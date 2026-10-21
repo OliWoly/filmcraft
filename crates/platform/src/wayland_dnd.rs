@@ -273,7 +273,11 @@ impl State {
             Ok(n) => {
                 let room = MAX_LIST_BYTES.saturating_sub(r.list.len());
                 r.list.extend_from_slice(buf.get(..n.min(room)).unwrap_or_default());
-                r.list.len() >= MAX_LIST_BYTES
+                let full = r.list.len() >= MAX_LIST_BYTES;
+                if full {
+                    keep_complete_lines(&mut r.list);
+                }
+                full
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => false,
             Err(e) => {
@@ -392,9 +396,29 @@ impl Dispatch<WlDataDevice, ()> for State {
     }
 }
 
+/// A list cut off at [`MAX_LIST_BYTES`] keeps only its complete lines: a URI cut short can still
+/// name a file (`…/video.mp4` → `…/vid`), and the drop would import that one instead.
+fn keep_complete_lines(list: &mut Vec<u8>) {
+    let end = list.iter().rposition(|&b| b == b'\n').map_or(0, |i| i.saturating_add(1));
+    list.truncate(end);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_cut_at_the_cap_drops_its_partial_last_line() {
+        let mut list = b"file:///tmp/a.mp4\r\nfile:///home/u/vid".to_vec();
+        keep_complete_lines(&mut list);
+        assert_eq!(crate::uri_list::file_paths(&list), [std::path::PathBuf::from("/tmp/a.mp4")]);
+        let mut one_partial = b"file:///home/u/vid".to_vec();
+        keep_complete_lines(&mut one_partial);
+        assert!(one_partial.is_empty());
+        let mut complete = b"file:///tmp/a.mp4\n".to_vec();
+        keep_complete_lines(&mut complete);
+        assert_eq!(complete, b"file:///tmp/a.mp4\n");
+    }
 
     #[test]
     fn only_a_copy_chosen_by_the_compositor_is_finished() {
