@@ -21,7 +21,7 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -34,7 +34,7 @@ use wayland_client::protocol::wl_data_device_manager::{self, DndAction, WlDataDe
 use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, event_created_child};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, event_created_child};
 
 const URI_LIST: &str = "text/uri-list";
 /// A file manager that has not sent the whole list after this long is given up on.
@@ -190,6 +190,17 @@ struct Reading {
 #[derive(Default)]
 struct OfferData {
     uri_list: AtomicBool,
+    /// The compositor's last `wl_data_offer.action` (`DndAction` bits); 0 until one arrives.
+    action: AtomicU32,
+}
+
+/// Whether a dropped offer may be told the drop finished. `finish` is a protocol error before the
+/// compositor has chosen an action (and the error would close winit's connection, the app's), and
+/// it tells the source the drop succeeded: after a `move` the file manager would delete the files
+/// we import by path. So only a version-3 offer whose action is `copy` is finished; every other
+/// offer is just destroyed, which the source takes as cancelled and keeps its files.
+fn may_finish(version: u32, action: u32) -> bool {
+    version >= 3 && action == DndAction::Copy.bits()
 }
 
 impl State {
@@ -274,8 +285,11 @@ impl State {
             return;
         }
         let Some(r) = self.reading.take() else { return };
-        if r.offer.version() >= 3 {
+        let action = r.offer.data::<OfferData>().map_or(0, |d| d.action.load(Ordering::Relaxed));
+        if may_finish(r.offer.version(), action) {
             r.offer.finish();
+        } else {
+            log::debug!("dropped file list read; offer not finished (version {}, action {action:#x})", r.offer.version());
         }
         r.offer.destroy();
         let _ = conn.flush();
@@ -322,10 +336,16 @@ impl Dispatch<WlCallback, ()> for State {
 
 impl Dispatch<WlDataOffer, OfferData> for State {
     fn event(_: &mut Self, _: &WlDataOffer, event: wl_data_offer::Event, data: &OfferData, _: &Connection, _: &QueueHandle<Self>) {
-        if let wl_data_offer::Event::Offer { mime_type } = event
-            && mime_type == URI_LIST
-        {
-            data.uri_list.store(true, Ordering::Relaxed);
+        match event {
+            wl_data_offer::Event::Offer { mime_type } if mime_type == URI_LIST => data.uri_list.store(true, Ordering::Relaxed),
+            wl_data_offer::Event::Action { dnd_action } => {
+                let bits = match dnd_action {
+                    WEnum::Value(a) => a.bits(),
+                    WEnum::Unknown(_) => 0,
+                };
+                data.action.store(bits, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 }
@@ -369,5 +389,24 @@ impl Dispatch<WlDataDevice, ()> for State {
             wl_data_device::Event::Selection { id: Some(offer) } => offer.destroy(),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_copy_chosen_by_the_compositor_is_finished() {
+        let copy = DndAction::Copy.bits();
+        assert!(may_finish(3, copy));
+        // No action received yet: finishing would be a protocol error on the shared connection.
+        assert!(!may_finish(3, 0));
+        // A move would make the file manager delete the files we import by path.
+        assert!(!may_finish(3, DndAction::Move.bits()));
+        assert!(!may_finish(3, DndAction::Ask.bits()));
+        assert!(!may_finish(3, copy | DndAction::Move.bits()));
+        // Version 1 and 2 offers have no `finish`.
+        assert!(!may_finish(2, copy));
     }
 }

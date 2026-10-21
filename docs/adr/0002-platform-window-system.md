@@ -46,7 +46,10 @@ Extend `crates/platform` to a second, narrow job: **window-system calls the wind
 3. **The worker cannot hang or crash the app.** It runs under `catch_unwind`; a dropped list is read
    through a socket pair with a 50 ms read slice and a 5 s deadline, so a file manager that never
    finishes writing cannot block shutdown; lists are capped (4 MiB, 10 000 paths). Failure to start
-   (no Wayland, no `wl_data_device_manager`) only leaves drops unavailable.
+   (no Wayland, no `wl_data_device_manager`) only leaves drops unavailable. A drop is `finish`ed only
+   when the compositor chose `copy`: finishing before any action is a protocol error, which would
+   close the shared connection, and after a `move` the file manager would delete the files we
+   import by path.
 4. **The public API is safe** and carries no FFI types: `WaylandDrops::start(&window, wake)` takes
    eframe's creation context (the `raw-window-handle` traits) and yields plain `DragEvent`s;
    `cursor_screen_position()` returns `Option<(i32, i32)>`.
