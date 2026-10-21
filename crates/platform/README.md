@@ -107,23 +107,12 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   HEVC pictures are sent the same way per slice segment (scaling lists only when enabled, converted
   to raster order). Pictures the DPB outputs are read back right away (`vaGetImage` into an NV12 or
   P010 image, then `biplanar.rs`), **the one GPU to CPU copy**. Surfaces: the stream's DPB size plus two.
-- **Linux: VA-API, AV1 (`av1C`)**: Main profile, 8- and 10-bit 4:2:0 (`vaapi/av1.rs`). The host side
-  is the software decoder's own `filmcraft_av1::Parser` (OBUs, sequence and frame headers, tile
-  payloads and the header-level reference state; `Decoder` decodes the frames it hands out), so
-  both read the stream alike and the parity tests are bit-exact. The front end keeps the eight
-  reference slots as surfaces (ten: the slots, the frame being decoded, one spare) and sends each
-  frame as one picture-parameter buffer and a slice parameter + data buffer per tile. AV1 has no
-  output reordering: a shown frame is read back as soon as it is decoded, a `show_existing_frame`
-  reads its slot again. *Mid-stream errors* (`HybridDecoder` continues in software): film grain
-  (synthesised by our decoder), scalable streams, a frame or reference of another size than the
-  stream's, a missing reference frame.
   - *frame_num gaps* (and every start at a non-IDR picture: an open-GOP seek) get "non-existing"
     frames like the software decoder's: copies of the latest decoded frame, mid-gray when there is
     none (`vaPutImage`). Pictures predicted from them (the leading pictures of an open GOP after a
     seek) are concealment in both decoders and can differ: the hardware also reads motion data the
     stand-ins do not have. Everything from the seek point on is bit-exact.
-  - *Declined up front* (our decoder is used): VP9 (not through VA-API yet), AV1 other than Main
-    4:2:0 8 / 10-bit, H.264 profiles
+  - *Declined up front* (our decoder is used): H.264 profiles
     other than Baseline / Main / High, 10-bit H.264, HEVC range extensions and profiles other than
     Main / Main 10 / Main Still Picture, 4:2:2 / 4:4:4, field / MBAFF coding, no libva, no render
     node or driver, a profile or size the driver does not decode. *Mid-stream errors*
@@ -132,6 +121,17 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
     15 HEVC reference frames, any driver error.
   - An HEVC `flush` ends the stream as in software (references are dropped and the next CRA
     leaves out its RASL pictures); the GOP cache always seeks after a flush.
+- **Linux: VA-API, AV1 (`av1C`)**: Main profile, 8- and 10-bit 4:2:0 (`vaapi/av1.rs`). The host side
+  is the software decoder's own `filmcraft_av1::Parser` (OBUs, sequence and frame headers, tile
+  payloads and the header-level reference state; `Decoder` decodes the frames it hands out), so
+  both read the stream alike and the parity tests are bit-exact. The front end keeps the eight
+  reference slots as surfaces (ten: the slots, the frame being decoded, one spare) and sends each
+  frame as one picture-parameter buffer and a slice parameter + data buffer per tile. AV1 has no
+  output reordering: a shown frame is read back as soon as it is decoded, a `show_existing_frame`
+  reads its slot again. *Declined up front*: AV1 other than Main 4:2:0 8 / 10-bit (High / Professional
+  profiles, 12-bit, 4:4:4 / 4:2:2, monochrome) and VP9 (not through VA-API yet). *Mid-stream errors* (`HybridDecoder` continues in software): film grain
+  (synthesised by our decoder), scalable streams, a frame or reference of another size than the
+  stream's, a missing reference frame.
 - **Other systems:** `register()` does nothing and returns `Availability::Unavailable`.
 - **`HybridDecoder`** (`hybrid.rs`, safe code): the hardware decoder plus the means to build our
   software decoder for the same `SampleEntry` (`filmcraft_codecs::software_video_decoder`). On a
@@ -285,7 +285,7 @@ level 4 High tier, which many hardware decoders refuse; it is now level 4.1 Main
   when Settings ▸ Playback ▸ Hardware decoding is Off, for formats it does not take (field-coded
   H.264, bit depths other than 8 / 10, 4:4:4 or monochrome, luma / chroma depth mismatch, larger
   than 8192×8192; on Windows also 4:2:2 and the profiles listed above; on Linux everything but
-  8-bit 4:2:0 progressive H.264 and 4:2:0 HEVC Main / Main 10) and when the OS cannot create a hardware session (VideoToolbox), a
+  8-bit 4:2:0 progressive H.264, 4:2:0 HEVC Main / Main 10 and AV1 Main 8 / 10-bit 4:2:0) and when the OS cannot create a hardware session (VideoToolbox), a
   GPU-backed decoder (Media Foundation) or a VA-API configuration and context (Linux).
 - **Interchangeable:** colour, pixel aspect, pts, presentation order, `is_random_access` and
   `is_disposable` come from the software decoders' own helpers (`filmcraft_codecs::hw`,
